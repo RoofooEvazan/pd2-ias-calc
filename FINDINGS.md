@@ -1,0 +1,151 @@
+# PD2 reverse-engineering findings
+
+Binaries: stock Diablo II 1.13c `D2Game.dll` / `D2Common.dll` / `D2Client.dll` (timestamps 2010-03-08), with
+PD2 changes applied at runtime by `ProjectDiablo.dll` (built 2026-05-13). Data: PD2 `data.zip` (launcher copy).
+Your local `data/global/excel` has custom edits (extra `d1_*` monsters, changed Levels/Skills). The tools use `data.zip`.
+
+Status key: **VERIFIED** = the game's own code was run natively in the harness and matched the formula on every
+test input. **READ** = read from disassembly, not yet executed. **OPEN** = not solved yet.
+
+## Tooling
+- No Ghidra. Network installs are blocked in the workspace, so the work uses objdump + Python.
+- `tools/pe.py` parses PE files (exports, imports, flat image). `tools/fn.py` extracts one function. `tools/txtdesc.py` recovers .txt column → struct offset tables from D2Common.
+- `harness/`: loads the real DLL images at their base addresses inside a freestanding 32-bit Linux process and calls game functions directly on the CPU.
+  - `driver.py` runs the hit roll. `monscale.c` runs the monster stat scaler.
+- PD2 patch records in ProjectDiablo.dll `.rdata` are 20 bytes: `{module, rva, value, relative, size}`, where module 0=D2Client, 2=D2Common, 3=D2Game.
+  - To check whether PD2 touches a function, scan these records for an RVA inside its range.
+
+## Hit roll: D2Game 0x6FCFDE90 (VERIFIED, 200k random cases × 100 rolls)
+`int __stdcall(eax=attacker, defender, arg2, isMissile)`, called from:
+- melee: 0x6FCFE5A0 (arg2 = skill ToHit via D2Common #10653)
+- missiles: 0x6FC5B040, 0x6FC5EF4E (arg2 = missile's stat 19)
+
+1. **Defense** = D2Common #10672(defender) + stat 33 (`armorclass_vs_hth`), or stat 32 (`armorclass_vs_missile`) for missiles.
+   - #10672: base = stat31 + trunc(dex/4); pct = stat16 + stat171; def = base + trunc(base×pct/100). When base ≤ 0 the % is mirrored: base − trunc(base×pct/100).
+   - Holy Shield adds its bonus through state 101 (skill calc).
+   - Then stat 182 `armor_override_percent`: def += trunc(def×v/100).
+2. **Player attacker (unit type 0)**
+   - AR = #10621 = stat19 + 5·dex − 35 + CharStats.ToHitFactor (+0x3C, VERIFIED offset).
+   - Then 0x6FCFB1F0 adjusts AR and defense against the target:
+     - stat115 `ignoretargetac`: defense = 0 if the target is a monster that is not superunique or unique (MonsterData+0x16 & 0xA), not an act boss (MonStats `boss`), and not a mercenary.
+     - stat116 `fractionaltargetac`: halved (toward zero) against players, act bosses, superuniques (flag 0x2) and mercs; capped at 100; defense −= trunc(def×v/100).
+     - stat123 `item_demon_tohit` is added to AR against a MonStats `demon`. stat124 `item_undead_tohit` against `lUndead`/`hUndead`.
+   - pct = weapon mastery (#10804, stat 342 melee only) + stat119 + arg2 + stat179 `attack_vs_montype`. AR += trunc(AR×pct/100).
+3. **Monster / merc attacker**: AR = stat19 + 5·dex + arg2; pct = stat119 only. Step 2's target adjustments are **skipped**.
+4. If def < 0: AR −= def, def = 0. If AR < 0: def −= AR, AR = 0.
+   - ratio = trunc(AR·100/(AR+def)), or 100 when the sum is 0.
+   - chance = trunc(ratio·aLvl·2/(aLvl+dLvl)), clamped to 5–95.
+5. RNG: seed at attacker+0x20/0x24, new = lo·0x6AC690C5 + hi (64-bit), roll = low32 % 100. Hit if roll < chance.
+- Caller 0x6FCFE5A0: a player defender in mode 3 (Run) is hit without an AR roll. After a hit, 0x6FCFB790 checks block/avoid/evade (PD2 patches around 0xDE661).
+- MonStats flag dword +0xC (VERIFIED via the column table): bit2 noRatio, bit6 boss, bit11 lUndead, bit12 hUndead, bit13 demon.
+- Mercenary classes (D2Common #11104): 271, 338, 359, 560, 561, plus PD2 hook 1056 (act4hire) → type 2.
+- MonsterData+0x16 flags: 0x2 superunique (stored alongside the SuperUniques id at +0x26), 0x4 champion, 0x8 unique, 0x10 minion (READ).
+
+## Monster stats
+- Scaler D2Common #11089 (0x6FDA4A00), VERIFIED 20k cases with the real MonLvl.txt:
+  - out.AC = trunc(MonStats.AC[d] × MonLvl[lvl].(L-)AC[d] / 100); out.TH likewise with A1TH / A2TH / S1TH and (L-)TH.
+  - noRatio uses the raw values. Level index is clamped to the last MonLvl row.
+- "L-" columns are used when game+0x6A (game-type byte from the create-game packet) ≠ 0 or the game is ladder (READ).
+  - The client sends 0 for connection types other than 0/6/8. Single player probably uses the non-L columns (OPEN: confirm).
+- Level at spawn (0x6FCCFDB0, READ): Normal uses MonStats Level. In NM/Hell (expansion), non-noRatio, non-boss monsters use Levels.txt MonLvl{2,3}Ex (Levels +0x16).
+  - Mercenaries use difficulty 0.
+- Monster AR (0x6FC97240, READ): computed at attack time from the current level with flag A1 (0x8), A2 (0x10) or S1/SC (0x20), then set as stat 19.
+  - In NM/Hell with p ≥ 2 players: AR += trunc(AR × f/128), where f = [0,0,8,16,24,32,40,48,56][p], or 8p−16 for p ≥ 9.
+- OPEN: champion / unique / minion adjustments.
+  - The MonUMod handler table is at 0x6FD2E550, indexed by mod id: 4 leveladd → 0x6FC41E80 (+3 lvl, ×5 exp); 16 champion → 0x6FC42DA0 (level −1? exp adjust).
+  - Still need the spawn-time level bonus and whether defense is recomputed after level changes.
+
+## Client display (D2Client 0x6FADC2D0, READ)
+- Character screen AR = #10621 base + trunc(base × (mastery + stat119 + selected skill ToHit)/100). This matches the server for the same skill, excluding target-specific bonuses.
+- PD2 replaces the display mastery call (D2Client +0x2C348 → PD 0x102728B0) to choose melee vs throw masteries.
+
+## PD2 patches checked
+None touch the hit roll, AR/defense (#10621/#10672), the scaler, or the monster level/AR code, apart from:
+- the merc-type hook (D2Common +0x1A2E2 → PD 0x10268E40, adds class 1056)
+- the moninit stat callback pointer (D2Game +0xAFF16)
+- block/evade handling after the hit (D2Game +0xDE661…)
+
+Caveat: PD2 realm servers could run different server code. This only covers the client install.
+
+## Attack speed (added)
+### Animation rate: D2Common 0x6FD83110 (VERIFIED, 60k cases, incl. EIAS helper 0x6FD823E0)
+- Diminishing-returns table 0x6FDE4608, rows {type, k, stat}:
+  - IAS(93) k=120, FHR(99) 120, FCR(105) 120, FBR(102) 120, FRW(96) 150.
+  - E = k·v/(k+v), with idiv (truncates toward zero). v = −k divides by zero.
+- Attack modes: s = stat68 `attackrate` + EIAS.
+  - Player in mode SQ (18): −30.
+  - Clamp 15..175.
+  - rate = animSpeed·s/100, unsigned floor, capped 0x7FFF. Stored at unit+0x4C (and unit+0x3C).
+- attackrate: base 100 (set when the character loads, D2Game 0x6FC760C6). Weapons carry stat68 = −Weapons.txt `speed` (D2Common 0x6FD7AEB6, column at item record +0xD8). Skill auras add `attackrate` (SIAS).
+- Other modes: cast min(100+EFCR,175); hit recovery 50+EFHR; block 50 (100 with Holy Shield) + EFBR; walk/run velocitypercent + EFRW (min 25).
+- Vanilla dual wield (both items type 0x2D): s += (w1.stat68 + w2.stat68)/2 − w1.stat68.
+- **PD2 replaces the dual-wield block** (D2Common +0x334AC → PD 0x10268A90) for players:
+  - Picks the weapon with the larger (stat68 + its own stat93).
+  - Temporarily detaches the other weapon's stats, then s = attackrate + EIAS computed with only the faster weapon attached.
+- Shapeshift override (0x6FD83C20 / 0x6FDA0CE0), when the unit has a transform state and player flag +0xC8 bit3:
+  - base = (current anim length & ~0xFF) / H.
+  - H = (humanA1frames·256) / trunc((100 − WSM + weaponIAS)·humanSpeed/100). This is D2Common 0x6FD767F0 on the right-hand weapon. It uses the weapon's own stat93, not the total.
+  - With no weapon, H = 19.
+  - Wolf = MonStats 430 token `40`. Bear = 431 token `TG`.
+### Animation length
+- unit+0x44 = position (8.8 fixed point), +0x48 = length = AnimData frames<<8, +0x50 = AnimData record.
+- AnimData.d2 format: 256 buckets × {count, records of 160 bytes: name[8], frames, speed, events[144]}. A missing key uses the default record at table+0x404 (frames 2048, speed 256), which is what SQ mode gets.
+- Start frame (#10031, 0x6FD82220) applies to players in A1/A2 only. Table 0x6FDE4480[weaponIdx][class]:
+  - Amazon and Sorceress: 1 unarmed, 2 with 1hs/1ht/stf/2hs/2ht.
+  - Weapon index from 0x6FDEF028: bow 1, 1hs 2, 1ht 3, stf 4, 2hs 5, 2ht 6, xbw 7, ht1 12, anything else 0.
+- Sequences:
+  - Skills.txt `seqnum` (+0x13) indexes 0x6FDECF40[1..23]. Each entry is 14 records of {ptr, frames, frames2}, in the order hth 1ht 2ht 1hs 2hs bow xbw stf 1js 1jt 1ss 1st ht1 ht2 (map 0x6FDECFA0).
+  - Rate uses base 256 with −30. Length = frames<<8. Start 0.
+- Weapon class for the animation (0x6FD93860):
+  - Barbarian dual: primary 1hs + other 1ht → 1js, 1ht+1ht → 1jt, 1ht+1hs → 1st, anything else 1ss. The primary is whichever weapon is swinging now (inventory +0x1C).
+  - Assassin with two claws → ht2.
+  - Two-handed grip → 2handedwclass.
+  - Otherwise the weapon's wclass.
+### Frame count (READ, not executed)
+- Server: D2Game 0x6FCFF7B0 (PD2 reimplements it at 0x102CCC30 with the same logic) schedules events when the mode starts at frame F:
+  - n = #{k≥1 : start·256 + k·rate < length}.
+  - The END timer (type 1) is at F+n+1.
+- Single-player loop order (D2Client 0x6FAF4B50): held-button repeat (0x6FAF46B0), then server ProcessPackets (#10040), then server frame (#10008 → timers), then the client unit update.
+  - The client's copy ends when pos+rate ≥ len, after n advances. It re-issues on the next loop, which the server processes before its END timer.
+  - The attack command is accepted while in A1/A2/SC/TH (0x6FC98340 → 0x6FC97E00: cur ≤ END+5). The same-mode SetMode does nothing and the scheduler restarts from the current frame.
+  - Held attacks therefore repeat every **n = ⌈(len − start·256)/rate⌉ − 1** frames.
+- PD2 changes command acceptance for GH/BL (cur+2 ≥ END), not for attacks.
+
+## Wereform speed (added)
+- **VERIFIED (60k cases):** the override 0x6FDA0CE0 / 0x6FD767F0 plus rate 0x6FD83110 match the page's formula exactly. Two fallbacks are included:
+  - The human animation lookup fails → H = 45 (0x6FD768B7).
+  - The override is 0 → the animation's own speed is used.
+  - A wrong-rule check (gear IAS or EIAS in the override, or WSM counted once) mismatched in 30–44k cases.
+- The human animation uses the character's own class token (0x6FD93C30 takes the unit's class), so item-granted forms on any class use that class's A1 animation.
+- **VERIFIED (20k cases), stale length:** D2Common SetMode #11090 → 0x6FD835F0 calls the rate function *before* storing the new length (+0x48). The first rate therefore uses the previous animation's length. In human form the override is unused, so this doesn't matter. In form, the base = previous length / H.
+- Server: attack start 0x6FC987C0 → 0x6FCFFF10 calls #10819 again after SetMode, so it uses the correct length.
+- Client (READ): attack start 0x6FADA750 → 0x6FAFDC70 → 0x6FADA6C0 → SetMode, with no later recalculation on that path (searched 5 calls deep).
+  - The client ends a local attack by setting neutral (0x6FACC4AC). The next held attack therefore starts with the NU length: wolf `40NUHTH` = 9 frames, bear `TGNUHTH` = 10.
+- **RESOLVED (READ): held attacks in form follow the client count.**
+  - Server END: timer → 0x6FC99850 → 0x6FC982F0 → SetMode(neutral) + timer cleanup. No packet is built or sent on this path. SetMode #11090 has no callbacks (direct calls only) and only sets unit+0xC4 bit 0.
+  - The only reader/clearer of +0xC4 bit 0 in D2Game is 0x6FCC2F90 (clears at 0x6FCC307B), and it exits unless the unit type is 1 (monster). Nothing reacts to a player's mode change by sending a packet.
+  - PD2's scheduler (0x102CCC30) only adds 0x102CD360, which stores the start frame in playerdata+0x198 instead of unit+0x44 for players. No network code.
+  - Client packet table: D2Client 0x6FB8DE60, 12-byte entries {handler, size, unit handler}, opcodes 0x00–0xAE. Dispatcher 0x6FB5CE20; unit packets are queued on unit+0xD8 (0x6FB5C630) and run by 0x6FB5BC20.
+  - Packets that can reach SetMode: unit commands 0x0C–0x10, 0x17, 0x4C/0x4D, 0x67–0x6D (all via 0x6FADA750; player branch 0x6FAC9830 applies them to the local player too), life/mana 0x18/0x95 (death only), plus unrelated ones (0x01, 0x09, 0x19–0x1F, 0x3F, 0x58, 0x61, 0x62, 0x77, 0x9C, 0xA9). None is sent by the END path.
+  - So the client ends its copy on its own schedule and only then re-issues. If the server finished first it idles in neutral; if the client is faster (e.g. S4 7 frames vs NU 9), the server accepts the new command mid-mode (0x6FC98340 table 0x6FC98410: A1/A2/SC/TH accept while cur ≤ END+5, S2/S4 always) and restarts. Either way the period is the client count.
+  - First swing straight out of a run/walk uses the RN/WL length (8 frames for both forms) instead of NU.
+  - PD2 patch records near these sites: D2Client 0x6FAD4555/0x6FAD4564 (sound call wrapper 0x102F0A70), D2Game 0x6FC97EF8 (player lookup callback) and 0x6FC981A6/0x6FC98216 (GH/BL acceptance). None touches attack timing.
+
+## Native verification round 2 (harness/start.c, wclass.c, seq.c, pdual.c, sched.c, accept.c)
+- **Start frame #10031 0x6FD82220 — VERIFIED (7,980 cases).** Players only. Modes A1/A2 always use the table; S3/S4 use it only when 0x6FD80530 is true (class Barbarian or Assassin, whose entries are 0). Row = index of the item record's `wclass` (+0xC0) in 0x6FDEF028, else 0.
+- **Weapon class 0x6FD93860 — VERIFIED (6,776 hand combinations), with one correction.**
+  - Hand choice: right item if its `component` (+0x115) is 5/6, else left; neither, or modes DT/DD → CharStats baseWClass (+0x4C, `hth`).
+  - Two weapons: Barbarian → 1js/1jt/1st/1ss rules by primary (inventory +0x1C); Assassin → ht2.
+  - Grip 0x6FD6FB80: one hand occupied → `2handedwclass` if the item is `2handed` (+0x11C), or `1or2handed` (+0x13D) and the unit is a Barbarian. Both hands occupied → one-handed if a Barbarian holds a `1or2handed` item; otherwise `2handedwclass` if either item is `2handed`.
+  - **Correction:** two-handed swords (wclass 1hs / 2handedwclass 2hs, 18 bases) swing with 2HS for every class, and for a Barbarian unless the other hand holds something. The calculator previously used 1HS for non-Barbarians. Fixed; the "Wield two-handed" option became "Shield in the other hand".
+- **Sequence setup #10099 0x6FD82820 — VERIFIED (23 seqnums × 14 classes).** +0x34 = frames<<8, +0x38 = 0, +0x3C = 0x100, +0x48 = frames2<<8 (equal to frames in PD2 data). Class slot via map 0x6FDECFA0 from the chooser's COF index.
+- **PD2 dual wield 0x10268A90 (via wrapper 0x102EEBF0) — VERIFIED (60,000 cases, PD2's own code).** PD lazy imports for 1.13c resolve to D2Common #10973 (0x6FD88B70, stat getter) and #10164 (0x6FD8AC90, attach/detach item stats); pointer 0x104E50F4 = EIAS helper 0x6FD823E0. Players: s = attackrate + EIAS with only the faster weapon (larger −WSM + own IAS; tie → second/left weapon) attached. Others: stock average. Afterwards the first weapon is attached and the second detached. Stub: #10164 only.
+- **Server scheduler — VERIFIED (20,000 setups).** Stock 0x6FCFF7B0 and PD2 0x102CCC30 produce identical timer lists (72k event timers). END at F + max(n,1) + 1. PD2 stores F·256 in playerdata+0x198. Stubs: timer insert 0x6FCAEA80 (recorder), start-frame lookup.
+- **Command acceptance 0x6FC98340 — VERIFIED (100,000 cases, no stubs; real timer lookup 0x6FCAE490).** Commands 0/1/5/17 always; else by mode: NU WL RN TN TW S2 S4 yes; A1 A2 SC TH if cur ≤ END+5 or command 4/9; KK if cur ≤ END+5; S1 unless Amazon; S3 unless Druid; DT GH BL DD no; SQ → 0x6FC98100 (PD2-patched, not run).
+- Still READ: client attack loop and held-button repeat, client packet handling, server attack start/recalc path, server END path.
+
+## Correction: corruption sockets (CubeMain.txt rows 420–494)
+- White/superior/low-quality weapons (`weap,nos,nor|hiq|low`): outcomes are only "destroyed (rare)" or "+1–6 sockets" — never IAS.
+- Other qualities (`weap,nos`, first matching row wins): bows/crossbows/two-handers (`bow`/`xbow`/`2han`) +3/4/5/6 sockets; other weapons +2/3/4; or the IAS/other mod outcomes.
+- Socket cap D2Common 0x6FD74610 (READ): min(Weapons.txt gemsockets, ItemTypes MaxSock1/25/40 by item level ≤25/≤40/>40).
+- Consequence: a crafted/rare one-hand Phase Blade tops out at 140 weapon IAS, so Paladin/Assassin cannot reach 2-frame werebear; only Amazon with bows can (crafted bow 171 needed/180 max, Cliffkiller 191/200).
