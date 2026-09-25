@@ -149,3 +149,29 @@ Caveat: PD2 realm servers could run different server code. This only covers the 
 - Other qualities (`weap,nos`, first matching row wins): bows/crossbows/two-handers (`bow`/`xbow`/`2han`) +3/4/5/6 sockets; other weapons +2/3/4; or the IAS/other mod outcomes.
 - Socket cap D2Common 0x6FD74610 (READ): min(Weapons.txt gemsockets, ItemTypes MaxSock1/25/40 by item level ≤25/≤40/>40).
 - Consequence: a crafted/rare one-hand Phase Blade tops out at 140 weapon IAS, so Paladin/Assassin cannot reach 2-frame werebear; only Amazon with bows can (crafted bow 171 needed/180 max, Cliffkiller 191/200).
+
+## Speed skills in the calculator
+
+Skills.txt aura stats that write `attackrate` (added straight to speed, not through EIAS):
+- Fanaticism `dm34` (Param3 10 → Param4 40), Wearwolf `dm34` (10 → 80), Frenzy `dm56` (0 → 50).
+- Quickness (PD2 Assassin): `((110*blvl)*(par4-par3))/(100*(blvl+6))+par3`, par3 15, par4 60; base level only.
+- Increased Speed: passive `item_fasterattackrate = blvl*2` — ordinary IAS (stat 93), goes through EIAS; in form it is gear IAS.
+- `dm(lvl,a,b)` = D2Common 0x6FD9DC30, verified natively (harness/dm.c, 20,792 cases, 0 mismatches).
+- Feral Rage and Hunger write only velocitypercent. Holy Freeze and Decrepify subtract attackrate (entered manually).
+- Sources: The Beast aura Fanaticism 8–10; Wolfhowl +4–6 Werewolf (gives non-Druids the Werewolf bonus in wolf form).
+The Fastest Frames tab's IAS figures assume no skill speed; tiers are unchanged because they are set at the 175 cap.
+
+## Follow-up swings (Zeal, Fury, Fend, Strafe, Dragon Talon)
+- Not SQ skills: anim A1 (KK for Dragon Talon). srvdofunc 13 (Zeal/Fury/Fend, p = Param2), 12 (Strafe, p = Param6), 42 (Dragon Talon, p = 100). Tables: srvstfunc 0x6FD27338 (<0x5B, record +0x2C), srvdofunc 0x6FD274A8 (<0xBF, +0x2E); client cltstfunc 0x6FB8E928 (+0xF2), cltdofunc 0x6FB8EA48 (+0xF4).
+- Hit count: start func sets calc1 (+0x138); do-func decrements; restart while count > 0. Zeal/Fury min(par5+lvl-1, par6) = 3; Fend 3; DT min(lvl/6+1,3); Strafe min(max(targets, min(calc3, calc1)), calc1).
+- Server restart 0x6FCC35D0 → 0x6FD02600 (PD2 replaces the call at 0x6FCC3602 with 0x102ED250 → 0x102CD0B0, same logic using playerdata+0x198): removes pending timers, k0 = tdiv((F − start)·(100−p),100), start = F − k0, events from position k0·256 checking frames from k0−1, END at F+n+1. **VERIFIED natively (harness/fup.c, 40,000 setups stock+PD, 0 mismatches).**
+- Client restart D2Client 0x6FB505F0: pos = tdiv((pos>>8)(100−p),100)<<8 (READ). Dragon Talon client sets pos = 0.
+- Client step D2Common #10853 0x6FD82460: j0 = (pos>>8) + (rate ≥ 256); pos += rate; events for frames j0..pos>>8. **VERIFIED natively (20,000 swings).**
+- Server first-swing events (0x6FCFF7B0): frames from the start frame, events only while pos < len. **VERIFIED (harness/schev.py, 20,000 setups).**
+- Event frames: first AnimData event 1–4; every player attack anim has exactly one.
+- Calculator: client swing lengths pace the repeat; server hit times shown when they differ (form, p < 100); server hits after the client's repeat are dropped.
+
+## Speed skills from equipment (any class)
+- Scanned every excel table for skill parameters naming a speed skill. Wearer-side sources: The Beast (Fanaticism aura 8–10), Wolfhowl (Werewolf oskill 4–6), Hustle (armor, `equipped-skill` Quickness SelfAura 6, plus 20 IAS), Fury runeword (+5 Frenzy, Barbarian only). Chaos +2 Blade Dance is Assassin-only and a sequence. Holy Freeze auras (Doomsayer, Ice, Shattered Wall) and Confuse/Decrepify procs act on enemies. No mercenary has a speed aura.
+- Hustle: stat 191 item_skillonequip handled by PD 0x102C6030 → D2Common #10302(unit, 556, 0, …) sets skill base level (+0x28) = 0, then D2Game 0x6FCCDB30 starts the aura at level 6. Calc `blvl` = skill+0x28 clamped (D2Common 0x6FDA14C6). So Hustle attackrate = 15 on any class (READ).
+- Same state `quickness` as the Assassin skill; do-func 18 (0x6FC628F0) replaces the state on each application and the aura repeats every 25 frames, so an Assassin with Hustle keeps +15 (READ).
