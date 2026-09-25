@@ -15,7 +15,10 @@ test input. **READ** = read from disassembly, not yet executed. **OPEN** = not s
 - PD2 patch records in ProjectDiablo.dll `.rdata` are 20 bytes: `{module, rva, value, relative, size}`, where module 0=D2Client, 2=D2Common, 3=D2Game.
   - To check whether PD2 touches a function, scan these records for an RVA inside its range.
 
-## Hit roll: D2Game 0x6FCFDE90 (VERIFIED, 200k random cases × 100 rolls)
+## Hit roll
+**PD2 replaces the final chance (VERIFIED, 8,180 native cases of PD 0x10271470, 0 mismatches).** PD2's own roll PD 0x10271740 (called from PD 0x10270EB0 and ~6 other sites) computes AR/defense like the stock code (PD 0x10271620 mirrors 0x6FCFB1F0), then: ratio = 111·AR/(AR+Def) (100 when both 0); chance = ratio·2·aLvl/(aLvl+dLvl); < 5 → 5; > 95 → excess = ratio − 95·L/(2·aLvl), excess = (S·excess/111)·90/S, chance = 95 + excess·2·aLvl/L, capped at 100; hit if pdRand % 100 < chance. So 100% is reachable, e.g. Ignore Target Defense on normal monsters at equal level. The stock function below is what 1.13c does without PD2.
+
+### Stock: D2Game 0x6FCFDE90 (VERIFIED, 200k random cases × 100 rolls)
 `int __stdcall(eax=attacker, defender, arg2, isMissile)`, called from:
 - melee: 0x6FCFE5A0 (arg2 = skill ToHit via D2Common #10653)
 - missiles: 0x6FC5B040, 0x6FC5EF4E (arg2 = missile's stat 19)
@@ -41,6 +44,41 @@ test input. **READ** = read from disassembly, not yet executed. **OPEN** = not s
 - Mercenary classes (D2Common #11104): 271, 338, 359, 560, 561, plus PD2 hook 1056 (act4hire) → type 2.
 - MonsterData+0x16 flags: 0x2 superunique (stored alongside the SuperUniques id at +0x26), 0x4 champion, 0x8 unique, 0x10 minion (READ).
 
+### PD2 pipeline in full (added; details, addresses and confidence in `adv/re/hit_pd2.md`, code `adv/re/hit.js`)
+- **VERIFIED as a whole** (`harness/hitpd.c` + `hitpd.py`, 30,000 random cases, 0 mismatches in AR, Def, chance, hit/miss, post-hit call and RNG state).
+  - It ran PD 0x10271740 with its helpers 0x10271620, 0x102727D0 (mastery choice), 0x102CE840, 0x10271470 and pdRand 0x102C5D10.
+  - Only the D2Common/D2Game imports were stubbed, by pre-filling PD's lazy-import slots.
+  - `node adv/re/test_hit.js` replays 2,534 of these cases through `hit.js`.
+- **Callers**:
+  - 31 of the 34 stock `call 0x6FCFE5A0` sites are redirected at runtime to wrapper 0x102EEDA0 → resolver **PD 0x10270EB0**.
+  - The 3 left alone are unreachable in practice: srvstfunc 16 (no skill uses it), 0x6FC97788 and 0x6FCC1185 (no references).
+  - All 12 callers of stock missile collision 0x6FC5EDE0 → PD 0x102723E0. It rolls only for Missiles.txt `ToHit`=1 (108/1057 missiles), with isMissile=1.
+  - The stock roll 0x6FCFDE90 is therefore effectively dead.
+- **No running auto-hit**: PD 0x10270EB0 always rolls. Stock skipped the roll for a player defender in mode 3 (READ).
+- **Mastery**: PD 0x102727D0 uses stat 345 `passive_mastery_throw_th` when the weapon's ItemTypes.Throwable and the used skill's itypea1 are both throwable, otherwise 342. It is not used for missiles.
+  - The missile path passes skill ToHit (#10653 of MissileData skill/level) + stat 345 as the to-hit argument, instead of the missile's stat 19 (READ).
+- **AR%** is applied in double math: bonus = trunc(AR·pct/100.0), clamped to 0x7FFFFFFF. Same as stock in normal ranges.
+- The chance function works in 32-bit int and wraps for AR above about 19M (modelled).
+- **RNG PD 0x102C5D10 is not the stock LCG**. new lo = hi + low32(lo·0x6AC690C5); new hi = low32((lo·A) >> 20) + carry. The output formula is the same; the next state differs.
+- **Area callbacks**:
+  - Splash (proc_SplashDamage / Golem / Skeleton Splash) never rolls.
+  - Leap Attack and the Blade Creeper AI roll with to-hit arg = stat119 + skill ToHit, so AR% counts twice (PD 0x1026F8F0).
+  - Blade Shield: roll only, no block and no range check (PD 0x1026FFE0).
+  - Smite ORs the hit bit (always hits) (READ).
+- **Block/avoid PD 0x1026FB60 → 0x1026FCF0: VERIFIED** (8,000 native cases).
+  - Shield block = #10212 (cap 75). No moving penalty; ÷3 vs wraithMapMod. There is no 90 cap: the 90 / PvP 75/80 caps belong to resistances.
+  - Then weapon block (stat 348, cap 75, wclass 2hs/ht2) → evade if moving → dodge/avoid.
+  - A moving defender with no evade gets nothing; a failed evade still tries dodge/avoid.
+  - PvP maps (157/159/166) halve each avoid chance. There is a 4-frame lockout.
+- **Post-hit** 0x102EFAF0 → stock 0x6FCFCE70: `item_preventheal` (117) applies state 52 to monsters except classes 704–709.
+- **Audit (complete factor list, `adv/re/hit_pd2.md` §7, `adv/re/hit_factors.json`)**:
+  - ITD has **no level condition**. The calls are D2Common #10064 (MonStats boss bit) and #11104 (hireling). Champions and minions are affected; this is VERIFIED on 106 native cases.
+  - PD2 map mods are routed by the ItemStatCost `Divide` column: map_mon_ac% → monster stat 16; map_mon_tohit/att → monster stat 119; map_glob_arealevel → game key 1, added to the monster level in Levels 137–201 (PD 0x10268D00).
+  - Hell 'desecrated' areas spawn normal monsters at level 85.
+  - Stat 120 (−def per hit) is stock and unpatched. It bakes active flat armorclass curses into the base on every hit.
+  - Negative defense (stacked −% ≤ −100) is added to AR.
+- The "PD2 patches checked" list below predates this. PD2 does replace the hit roll and resolver, through runtime-built patch records rather than static `.rdata` records.
+
 ## Monster stats
 - Scaler D2Common #11089 (0x6FDA4A00), VERIFIED 20k cases with the real MonLvl.txt:
   - out.AC = trunc(MonStats.AC[d] × MonLvl[lvl].(L-)AC[d] / 100); out.TH likewise with A1TH / A2TH / S1TH and (L-)TH.
@@ -51,7 +89,14 @@ test input. **READ** = read from disassembly, not yet executed. **OPEN** = not s
   - Mercenaries use difficulty 0.
 - Monster AR (0x6FC97240, READ): computed at attack time from the current level with flag A1 (0x8), A2 (0x10) or S1/SC (0x20), then set as stat 19.
   - In NM/Hell with p ≥ 2 players: AR += trunc(AR × f/128), where f = [0,0,8,16,24,32,40,48,56][p], or 8p−16 for p ≥ 9.
-- OPEN: champion / unique / minion adjustments.
+- Champion / unique / minion adjustments (READ, added; see `adv/re/hit_pd2.md` §4):
+  - Uniques, superuniques and their minions: umod 4 leveladd → **+3 levels**.
+  - Champions: +3, then −1 in the champion handler → **+2 levels**.
+  - Champion stat119 += tdiv(CDB·75, 100), where CDB = DifficultyLevels ChampionDamageBonus 90/75/66.
+  - `strong`: unique +CDB, minion +CDB/2. `berserk`: +3·CDB AR%.
+  - Fanatic: stat16 = −70 (defense −70%). Stone skin: stat31 × 2.
+  - AR is recomputed at attack time from the boosted level. Defense stays at its spawn-level value.
+- (was OPEN) champion / unique / minion adjustments.
   - The MonUMod handler table is at 0x6FD2E550, indexed by mod id: 4 leveladd → 0x6FC41E80 (+3 lvl, ×5 exp); 16 champion → 0x6FC42DA0 (level −1? exp adjust).
   - Still need the spawn-time level bonus and whether defense is recomputed after level changes.
 
@@ -193,3 +238,9 @@ Details in adv/re/damage.md, defense.md, skilldmg.md, minions.md.
 - Monster → player (VERIFIED per-type step): flat DR → resist/%DR (cap 50) → absorb % (cap 40) → absorb flat; PD2 clamps each type at 0; caps min(75+max,90).
 - Skill damage (VERIFIED 58k + calc VM 24k): mastery multiplies the synergised value; Fog ternary precedence differs from C.
 - Summons/mercs (VERIFIED building blocks): summon level min(clvl, 3·clvl/4 + lvl); merc per-level /8 (str/dex), /4 (res).
+
+## Item drops (added, adv/re/drops.md, drops.js)
+- VERIFIED natively (harness/tcq.c, 20k cases on the full PD2 TC table, 0 mismatches): TC wrapper 0x6FC32D60 + #10634 upgrade, TC routine 0x6FC32380 (NoDrop with players, picks, quality-word max along the chain, 6-item cap, gold mul, GF), quality roll 0x6FC2FC40 incl. the always-magic shortcut. harness/upq.c (30k, 0 mismatches): unique picker 0x6FC2F370 (+PD patch 0x6FC2F5CE: no min-1 rarity) and set picker 0x6FC33C20.
+- Normal map monsters: `Map H2H t1/t2/t3` share a group at level 85, so all upgrade to t3. Uniques are once per game (game+0x1B24); a repeat becomes rare.
+- PD death handler 0x102C11F0: specials (keys, sigils, unique maps), extra full drops (T4 maps, levels 197-199, dropbonus, skirmish), map-stat TCs, then the stock drop.
+
