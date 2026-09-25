@@ -175,3 +175,21 @@ The Fastest Frames tab's IAS figures assume no skill speed; tiers are unchanged 
 - Scanned every excel table for skill parameters naming a speed skill. Wearer-side sources: The Beast (Fanaticism aura 8–10), Wolfhowl (Werewolf oskill 4–6), Hustle (armor, `equipped-skill` Quickness SelfAura 6, plus 20 IAS), Fury runeword (+5 Frenzy, Barbarian only). Chaos +2 Blade Dance is Assassin-only and a sequence. Holy Freeze auras (Doomsayer, Ice, Shattered Wall) and Confuse/Decrepify procs act on enemies. No mercenary has a speed aura.
 - Hustle: stat 191 item_skillonequip handled by PD 0x102C6030 → D2Common #10302(unit, 556, 0, …) sets skill base level (+0x28) = 0, then D2Game 0x6FCCDB30 starts the aura at level 6. Calc `blvl` = skill+0x28 clamped (D2Common 0x6FDA14C6). So Hustle attackrate = 15 on any class (READ).
 - Same state `quickness` as the Assassin skill; do-func 18 (0x6FC628F0) replaces the state on each application and the aura repeats every 25 frames, so an Assassin with Hustle keeps +15 (READ).
+
+## Advanced Stats page (added)
+Details and JS for each item are in adv/re/*.md / *.js.
+- Item stat values for ValShift stats (7/9/11 life/mana/stamina, 216/217) are whole points in saves and the Armory; the game keeps them << 8. Engine now shifts item and set-bonus lists.
+- Passive stats: D2Common #10056 (0x6FDA2480) is gated on passivestate > 0, not the `passive` column (Paladin aura passives such as Prayer hpregen blvl, Vigor FRW blvl, resist-aura max resist apply always).
+- Auras (adv/re/auras.md, READ): do-func 65 owner gets aurastats + passivestats (PD2 NOPs the stock passivestate test at D2Game 0x6FCBAA75); party/mercs get aurastats only; 66/81 owner passivestats only; 18 aura+passive; 68/25/116/120/9 aurastats; aurafilter never decides the owner. blvl = hard points in that exact skill id (item copies 0).
+- Character screen (adv/re/charscreen.md, VERIFIED 30k): AR = base + base*(119 + mastery 342 + skill ToHit)/100, base = T19 + 5*dex − 35 + ToHitFactor; defense #10672; damage 0x6FAE1220/0x6FAE0E30; an item's own ED stays in the item when it has damage/defense (0x6FD89E5F). PD2 mastery lookup 0x102728B0.
+- Block (adv/re/block_regen.md, VERIFIED): #10212 (toblock + BlockFactor)*(dex−15)/(2*clvl) ≤ 75, shield only; PD2 roll 0x1026FB60 has no running penalty. FBR base 50/100 (Holy Shield), no 175 cap. Regen: life T74/256 per frame; mana max(1, maxmana/(ManaRegen*25))*(100+T27)/100 + T26.
+- MF/GF/XP/FRW (adv/re/mf_misc.md, VERIFIED): dim(mf,f) = mf ≤ 10 ? mf : mf*f/(mf+f), f = 250/500/600; GF ×(100+gf)/100; FRW max(25, vel% + 150*frw/(150+frw)).
+- Skill attack-rate terms (adv/re/skill_speed.md, READ): Dragon Tail Param4 (−20) server+client; Double Swing par5 (+50) client only; Berserk calc3 server only. BH's IAS list includes the Dragon Tail term (adv/re/bh_ias.md) and matched: 0/4/11/23/39(10)/63/102/187.
+- Cast in SQ uses FCR when the skill's seqtrans is SC (0x6FD80B80): Chain Lightning / Frozen Orb 19-frame sequence at speed 256.
+
+## Combat additions (Advanced Stats page)
+Details in adv/re/damage.md, defense.md, skilldmg.md, minions.md.
+- Player → monster (VERIFIED): server adds stat 111 before the percent; crit then DS, only one (PD 0x10270E00); pierce ignored at resist ≥ 100, negative resist halved for player-owned attackers, floor −100 (PD 0x1026F410); CB 1/8 normal, 1/10 players/mercs, prime evils 1/(70+10·(100−life%)) (PD 0x102AF610); OW (PD 0x102AF060); leech physical only ÷ difficulty × Drain (PD 0x102700F0).
+- Monster → player (VERIFIED per-type step): flat DR → resist/%DR (cap 50) → absorb % (cap 40) → absorb flat; PD2 clamps each type at 0; caps min(75+max,90).
+- Skill damage (VERIFIED 58k + calc VM 24k): mastery multiplies the synergised value; Fog ternary precedence differs from C.
+- Summons/mercs (VERIFIED building blocks): summon level min(clvl, 3·clvl/4 + lvl); merc per-level /8 (str/dex), /4 (res).
