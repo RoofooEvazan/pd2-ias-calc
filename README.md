@@ -8,7 +8,7 @@ An attack speed calculator for **Project Diablo 2**. Every number comes from the
 
 | Tab | What it does |
 |---|---|
-| **IAS Calculator** | Frames per attack and breakpoints for any class, form (human, werewolf, werebear), weapon, attack and skill. Includes a grid of weapon IAS × other-gear IAS. |
+| **IAS Calculator** | Frames per attack and breakpoints for any class, form (human, werewolf, werebear), weapon, attack and skill. Sequence skills show when each hit lands; in werewolf / werebear form, Rabies and Hunger (S3) are covered, and the notes say how much IAS the weapon itself needs and how much in total. Includes a grid of weapon IAS × other-gear IAS. |
 | **Fastest Frames** | For every class and form, the two fastest held-attack frame counts and every weapon setup that reaches them. Click a class, form or frame count to expand it. Each row has an **Open** button that loads it into the calculator. |
 | **How IAS is Calculated** | A plain-language, step-by-step explanation for human, werewolf and werebear, with worked examples. |
 | **Developer Reference** | The full rules, data formats, extracted tables, a reference implementation and a map of the game functions behind them. |
