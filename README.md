@@ -21,6 +21,8 @@ The rules were recovered from the Diablo II 1.13c DLLs that PD2 uses (`D2Common.
 
 Most rules were **verified**. The game's own machine code was loaded into a test harness and run directly on the CPU with tens of thousands of inputs, and it matched the formulas on every case. The few rules that were only read from the code, not run, are marked **READ** in the Developer Reference. The full research log is in [`FINDINGS.md`](FINDINGS.md).
 
+In werewolf / werebear form, the speed step uses the human attack named by the weapon's own class in the item data, so two-handed swords count as the one-hand swing (corrected 2026-10-07, verified natively and in-game: a werewolf Barbarian with a Colossal Sword holds at 4 frames with 140 weapon IAS, not 5; see `FINDINGS.md`).
+
 ## Updating the site
 
 Replace `index.html` with a new version, then commit. GitHub Pages republishes automatically within a minute or two.
